@@ -1,19 +1,22 @@
 # Copyright (c) OpenMMLab. All rights reserved.
-
-import warnings
+from typing import Optional
 
 import torch
 import torch.nn.functional as F
-from mmyolo.registry import TASK_UTILS
+from mmdet.models.task_modules.assigners import AssignResult, SimOTAAssigner
 from mmdet.utils import ConfigType
-from mmdet.models.task_modules.assigners import BaseAssigner, AssignResult
+from mmengine.structures import InstanceData
+
+from mmyolo.registry import TASK_UTILS
 
 INF = 1000000.0
 EPS = 1.0e-7
 
+
 @TASK_UTILS.register_module()
-class AlignOTAAssigner(BaseAssigner):
+class AlignOTAAssigner(SimOTAAssigner):
     """Computes matching between predictions and ground truth.
+
     Args:
         center_radius (int | float, optional): Ground truth center size
             to judge whether a prior is in center. Default 2.5.
@@ -24,6 +27,7 @@ class AlignOTAAssigner(BaseAssigner):
         cls_weight (int | float, optional): The scale factor for classification
             cost. Default 1.0.
     """
+
     def __init__(self,
                  center_radius: float = 2.5,
                  candidate_topk: int = 10,
@@ -37,12 +41,10 @@ class AlignOTAAssigner(BaseAssigner):
         self.iou_calculator = TASK_UTILS.build(iou_calculator)
 
     def assign(self,
-               pred_scores,
-               priors,
-               decoded_bboxes,
-               gt_bboxes,
-               gt_labels,
-               gt_bboxes_ignore=None):
+               pred_instances: InstanceData,
+               gt_instances: InstanceData,
+               gt_instances_ignore: Optional[InstanceData] = None,
+               **kwargs) -> AssignResult:
         """Assign gt to priors using SimOTA. It will switch to CPU mode when
         GPU is out of memory.
         Args:
@@ -61,61 +63,13 @@ class AlignOTAAssigner(BaseAssigner):
         Returns:
             assign_result (obj:`AssignResult`): The assigned result.
         """
-        try:
-            assign_result = self._assign(pred_scores, priors, decoded_bboxes,
-                                         gt_bboxes, gt_labels,
-                                         gt_bboxes_ignore, EPS)
-            return assign_result
-        except RuntimeError:
-            origin_device = pred_scores.device
-            warnings.warn('OOM RuntimeError is raised due to the huge memory '
-                          'cost during label assignment. CPU mode is applied '
-                          'in this batch. If you want to avoid this issue, '
-                          'try to reduce the batch size or image size.')
-            torch.cuda.empty_cache()
-
-            pred_scores = pred_scores.cpu()
-            priors = priors.cpu()
-            decoded_bboxes = decoded_bboxes.cpu()
-            gt_bboxes = gt_bboxes.cpu().float()
-            gt_labels = gt_labels.cpu()
-
-            assign_result = self._assign(pred_scores, priors, decoded_bboxes,
-                                         gt_bboxes, gt_labels,
-                                         gt_bboxes_ignore, EPS)
-            assign_result.gt_inds = assign_result.gt_inds.to(origin_device)
-            assign_result.max_overlaps = assign_result.max_overlaps.to(
-                origin_device)
-            assign_result.labels = assign_result.labels.to(origin_device)
-
-            return assign_result
-
-    def _assign(self,
-                pred_scores,
-                priors,
-                decoded_bboxes,
-                gt_bboxes,
-                gt_labels,
-                gt_bboxes_ignore=None):
-        """Assign gt to priors using SimOTA.
-        Args:
-            pred_scores (Tensor): Classification scores of one image,
-                a 2D-Tensor with shape [num_priors, num_classes]
-            priors (Tensor): All priors of one image, a 2D-Tensor with shape
-                [num_priors, 4] in [cx, xy, stride_w, stride_y] format.
-            decoded_bboxes (Tensor): Predicted bboxes, a 2D-Tensor with shape
-                [num_priors, 4] in [tl_x, tl_y, br_x, br_y] format.
-            gt_bboxes (Tensor): Ground truth bboxes of one image, a 2D-Tensor
-                with shape [num_gts, 4] in [tl_x, tl_y, br_x, br_y] format.
-            gt_labels (Tensor): Ground truth labels of one image, a Tensor
-                with shape [num_gts].
-            gt_bboxes_ignore (Tensor, optional): Ground truth bboxes that are
-                labelled as `ignored`, e.g., crowd boxes in COCO.
-        Returns:
-            :obj:`AssignResult`: The assigned result.
-        """
-
+        gt_bboxes = gt_instances.bboxes
+        gt_labels = gt_instances.labels
         num_gt = gt_bboxes.size(0)
+
+        decoded_bboxes = pred_instances.bboxes
+        pred_scores = pred_instances.scores
+        priors = pred_instances.priors
         num_bboxes = decoded_bboxes.size(0)
 
         # assign 0 by default
@@ -140,31 +94,35 @@ class AlignOTAAssigner(BaseAssigner):
                 assigned_labels = decoded_bboxes.new_full((num_bboxes, ),
                                                           -1,
                                                           dtype=torch.long)
-            return AssignResult(num_gt,
-                                assigned_gt_inds,
-                                max_overlaps,
-                                labels=assigned_labels)
+            return AssignResult(
+                num_gt, assigned_gt_inds, max_overlaps, labels=assigned_labels)
 
         pairwise_ious = self.iou_calculator(valid_decoded_bbox, gt_bboxes)
         iou_cost = -torch.log(pairwise_ious + EPS)
 
-        gt_onehot_label = (F.one_hot(gt_labels.to(
-            torch.int64), pred_scores.shape[-1]).float().unsqueeze(0).repeat(
-                num_valid, 1, 1))
+        gt_onehot_label = (
+            F.one_hot(gt_labels.to(torch.int64),
+                      pred_scores.shape[-1]).float().unsqueeze(0).repeat(
+                          num_valid, 1, 1))
 
         valid_pred_scores = valid_pred_scores.unsqueeze(1).repeat(1, num_gt, 1)
 
         soft_label = gt_onehot_label * pairwise_ious[..., None]
         scale_factor = soft_label - valid_pred_scores
-
-        cls_cost = F.binary_cross_entropy(
-            valid_pred_scores, soft_label,
-            reduction='none') * scale_factor.abs().pow(2.0)
+        # disable AMP autocast and calculate BCE with FP32 to avoid overflow
+        with torch.cuda.amp.autocast(enabled=False):
+            cls_cost = (
+                F.binary_cross_entropy(
+                    valid_pred_scores.to(dtype=torch.float32),
+                    soft_label,
+                    reduction='none',
+                ) *
+                scale_factor.abs().pow(2.0).to(dtype=valid_pred_scores.dtype))
 
         cls_cost = cls_cost.sum(dim=-1)
-        cost_matrix = (cls_cost * self.cls_weight +
-                       iou_cost * self.iou_weight +
-                       (~is_in_boxes_and_center) * INF)
+        cost_matrix = (
+            cls_cost * self.cls_weight + iou_cost * self.iou_weight +
+            (~is_in_boxes_and_center) * INF)
         matched_pred_ious, matched_gt_inds = \
             self.dynamic_k_matching(
                 cost_matrix, pairwise_ious, num_gt, valid_mask)
@@ -177,80 +135,5 @@ class AlignOTAAssigner(BaseAssigner):
                                                  -INF,
                                                  dtype=torch.float32)
         max_overlaps[valid_mask] = matched_pred_ious
-        return AssignResult(num_gt,
-                            assigned_gt_inds,
-                            max_overlaps,
-                            labels=assigned_labels)
-
-    def get_in_gt_and_in_center_info(self, priors, gt_bboxes):
-        num_gt = gt_bboxes.size(0)
-
-        repeated_x = priors[:, 0].unsqueeze(1).repeat(1, num_gt)
-        repeated_y = priors[:, 1].unsqueeze(1).repeat(1, num_gt)
-        repeated_stride_x = priors[:, 2].unsqueeze(1).repeat(1, num_gt)
-        repeated_stride_y = priors[:, 3].unsqueeze(1).repeat(1, num_gt)
-
-        # is prior centers in gt bboxes, shape: [n_prior, n_gt]
-        l_ = repeated_x - gt_bboxes[:, 0]
-        t_ = repeated_y - gt_bboxes[:, 1]
-        r_ = gt_bboxes[:, 2] - repeated_x
-        b_ = gt_bboxes[:, 3] - repeated_y
-
-        deltas = torch.stack([l_, t_, r_, b_], dim=1)
-        is_in_gts = deltas.min(dim=1).values > 0
-        is_in_gts_all = is_in_gts.sum(dim=1) > 0
-
-        # is prior centers in gt centers
-        gt_cxs = (gt_bboxes[:, 0] + gt_bboxes[:, 2]) / 2.0
-        gt_cys = (gt_bboxes[:, 1] + gt_bboxes[:, 3]) / 2.0
-        ct_box_l = gt_cxs - self.center_radius * repeated_stride_x
-        ct_box_t = gt_cys - self.center_radius * repeated_stride_y
-        ct_box_r = gt_cxs + self.center_radius * repeated_stride_x
-        ct_box_b = gt_cys + self.center_radius * repeated_stride_y
-
-        cl_ = repeated_x - ct_box_l
-        ct_ = repeated_y - ct_box_t
-        cr_ = ct_box_r - repeated_x
-        cb_ = ct_box_b - repeated_y
-
-        ct_deltas = torch.stack([cl_, ct_, cr_, cb_], dim=1)
-        is_in_cts = ct_deltas.min(dim=1).values > 0
-        is_in_cts_all = is_in_cts.sum(dim=1) > 0
-
-        # in boxes or in centers, shape: [num_priors]
-        is_in_gts_or_centers = is_in_gts_all | is_in_cts_all
-
-        # both in boxes and centers, shape: [num_fg, num_gt]
-        is_in_boxes_and_centers = (is_in_gts[is_in_gts_or_centers, :]
-                                   & is_in_cts[is_in_gts_or_centers, :])
-        return is_in_gts_or_centers, is_in_boxes_and_centers
-
-    def dynamic_k_matching(self, cost, pairwise_ious, num_gt, valid_mask):
-        matching_matrix = torch.zeros_like(cost)
-        # select candidate topk ious for dynamic-k calculation
-        candidate_topk = min(self.candidate_topk, pairwise_ious.size(0))
-        topk_ious, _ = torch.topk(pairwise_ious, candidate_topk, dim=0)
-        # calculate dynamic k for each gt
-        dynamic_ks = torch.clamp(topk_ious.sum(0).int(), min=1)
-        for gt_idx in range(num_gt):
-            _, pos_idx = torch.topk(cost[:, gt_idx],
-                                    k=dynamic_ks[gt_idx].item(),
-                                    largest=False)
-            matching_matrix[:, gt_idx][pos_idx] = 1.0
-
-        del topk_ious, dynamic_ks, pos_idx
-
-        prior_match_gt_mask = matching_matrix.sum(1) > 1
-        if prior_match_gt_mask.sum() > 0:
-            cost_min, cost_argmin = torch.min(cost[prior_match_gt_mask, :],
-                                              dim=1)
-            matching_matrix[prior_match_gt_mask, :] *= 0.0
-            matching_matrix[prior_match_gt_mask, cost_argmin] = 1.0
-        # get foreground mask inside box and center prior
-        fg_mask_inboxes = matching_matrix.sum(1) > 0.0
-        valid_mask[valid_mask.clone()] = fg_mask_inboxes
-
-        matched_gt_inds = matching_matrix[fg_mask_inboxes, :].argmax(1)
-        matched_pred_ious = (matching_matrix *
-                             pairwise_ious).sum(1)[fg_mask_inboxes]
-        return matched_pred_ious, matched_gt_inds
+        return AssignResult(
+            num_gt, assigned_gt_inds, max_overlaps, labels=assigned_labels)

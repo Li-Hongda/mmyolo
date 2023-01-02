@@ -173,7 +173,8 @@ class RepVGGBlock(nn.Module):
 
         padding_11 = padding - kernel_size // 2
 
-        self.nonlinearity = MODELS.build(act_cfg) if act_cfg is not None else nn.Identity()
+        self.nonlinearity = MODELS.build(
+            act_cfg) if act_cfg is not None else nn.Identity()
 
         if use_se:
             raise NotImplementedError('se block not supported yet')

@@ -19,26 +19,26 @@ persistent_workers = True
 
 model = dict(
     type='YOLODetector',
-    use_syncbn=False,    
-    data_preprocessor=dict(
-        type='mmdet.DetDataPreprocessor',
-        bgr_to_rgb=True),
-    backbone=dict(type='TinyNAS',
-                  arch='M',
-                  out_indices=(2, 3, 4),
-                  act_cfg=dict(type='SiLU',inplace=True)),
-    neck=dict(type='GiraffeNeckv2',
-              deepen_factor=1.5,
-              expansion=1.0,            
-              in_channels=[128, 256, 512],
-              out_channels=[128, 256, 512],
-              act_cfg=dict(type='SiLU',inplace=True)),
+    use_syncbn=False,
+    data_preprocessor=dict(type='mmdet.DetDataPreprocessor', bgr_to_rgb=True),
+    backbone=dict(
+        type='TinyNAS',
+        arch='M',
+        out_indices=(2, 3, 4),
+        act_cfg=dict(type='SiLU', inplace=True)),
+    neck=dict(
+        type='GiraffeNeckv2',
+        deepen_factor=1.5,
+        expansion=1.0,
+        in_channels=[128, 256, 512],
+        out_channels=[128, 256, 512],
+        act_cfg=dict(type='SiLU', inplace=True)),
     bbox_head=dict(
         type='ZEROHead',
         head_module=dict(
             type='ZEROHeadModule',
             num_classes=80,
-            in_channels=[128,256,512],
+            in_channels=[128, 256, 512],
             stacked_convs=0,
             feat_channels=256,
             reg_max=16),
@@ -47,11 +47,11 @@ model = dict(
         bbox_coder=dict(type='mmdet.DistancePointBBoxCoder'),
         loss_cls=dict(
             type='mmdet.QualityFocalLoss',
-            use_sigmoid=True,
             beta=2.0,
-            loss_weight=1.0),
+            loss_weight=1.0,
+            activated=True),
         loss_bbox=dict(type='mmdet.GIoULoss', loss_weight=2.0),
-        loss_obj=dict(type='mmdet.DistributionFocalLoss',loss_weight=0.25)),
+        loss_obj=dict(type='mmdet.DistributionFocalLoss', loss_weight=0.25)),
     train_cfg=dict(
         assigner=dict(
             type='AlignOTAAssigner',
@@ -76,7 +76,6 @@ test_pipeline = [
                    'scale_factor'))
 ]
 
-
 albu_train_transforms = [
     dict(type='Blur', p=0.01),
     dict(type='MedianBlur', p=0.01),
@@ -88,7 +87,6 @@ pre_transform = [
     dict(type='LoadImageFromFile', file_client_args=_base_.file_client_args),
     dict(type='LoadAnnotations', with_bbox=True)
 ]
-
 
 train_pipeline = [
     *pre_transform,
@@ -123,7 +121,6 @@ train_pipeline = [
                    'flip_direction'))
 ]
 
-
 train_dataloader = dict(
     batch_size=train_batch_size_per_gpu,
     num_workers=train_num_workers,
@@ -139,7 +136,6 @@ train_dataloader = dict(
         pipeline=train_pipeline))
 
 custom_hooks = []
-
 
 train_cfg = dict(
     type='EpochBasedTrainLoop',
@@ -173,7 +169,8 @@ val_dataloader = dict(
         data_prefix=dict(img='val2017/'),
         filter_cfg=dict(filter_empty_gt=True, min_size=0),
         ann_file='annotations/instances_val2017.json',
-        pipeline=test_pipeline,))
+        pipeline=test_pipeline,
+    ))
 
 test_dataloader = val_dataloader
 
