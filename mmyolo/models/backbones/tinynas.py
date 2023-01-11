@@ -34,7 +34,7 @@ class ResConvBlock(BaseModule):
                 kernel_size=1,
                 stride=1,
                 norm_cfg=norm_cfg,
-                act_cfg=act_cfg)
+                act_cfg=None)
         else:
             self.conv1 = ConvModule(
                 in_channels,

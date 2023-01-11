@@ -1,7 +1,7 @@
 _base_ = '../_base_/default_runtime.py'
 
 # dataset settings
-data_root = 'data/coco/'
+data_root = '/disk0/dataset/coco/'
 dataset_type = 'YOLOv5CocoDataset'
 
 # parameters that often need to be modified
@@ -127,7 +127,7 @@ train_dataloader = dict(
         data_root=data_root,
         ann_file='annotations/instances_train2017.json',
         data_prefix=dict(img='train2017/'),
-        filter_cfg=dict(filter_empty_gt=False, min_size=32),
+        filter_cfg=dict(filter_empty_gt=True, min_size=32),
         pipeline=train_pipeline))
 
 custom_hooks = []

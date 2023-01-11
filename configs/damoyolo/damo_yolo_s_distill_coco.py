@@ -8,7 +8,7 @@ dataset_type = 'YOLOv5CocoDataset'
 img_scale = (640, 640)  # height, width
 max_epochs = 300
 save_epoch_intervals = 10
-train_batch_size_per_gpu = 1
+train_batch_size_per_gpu = 2
 train_num_workers = 2
 val_batch_size_per_gpu = 20
 val_num_workers = 2
@@ -17,9 +17,12 @@ strides = [8, 16, 32]
 # persistent_workers must be False if num_workers is 0.
 persistent_workers = True
 
+teacher_ckpt = 'work_dirs/damo_yolo_m_coco/damoyolo_M_coco.pth'  # noqa
 model = dict(
-    type='YOLODetector',
+    type='KnowledgeDistillationYOLODetector',
     use_syncbn=False,
+    teacher_config='configs/damoyolo/damo_yolo_m_coco.py',
+    teacher_ckpt=teacher_ckpt,
     data_preprocessor=dict(type='mmdet.DetDataPreprocessor', bgr_to_rgb=True),
     backbone=dict(type='TinyNAS', arch='S', out_indices=(2, 4, 5)),
     neck=dict(
@@ -46,7 +49,8 @@ model = dict(
             loss_weight=1.0,
             activated=True),
         loss_bbox=dict(type='mmdet.GIoULoss', loss_weight=2.0),
-        loss_obj=dict(type='mmdet.DistributionFocalLoss', loss_weight=0.25)),
+        loss_obj=dict(type='mmdet.DistributionFocalLoss', loss_weight=0.25),
+        loss_distill=dict(type='CWDLoss')),
     train_cfg=dict(
         assigner=dict(
             type='AlignOTAAssigner',
@@ -78,25 +82,26 @@ pre_transform = [
 
 train_pipeline = [
     *pre_transform,
-    # dict(
-    #     type='Mosaic',
-    #     img_scale=img_scale,
-    #     pad_val=114.0,
-    #     pre_transform=pre_transform),
-    # dict(
-    #     type='mmdet.RandomAffine',
-    #     scaling_ratio_range=(0.1, 2.0),
-    #     border=(-img_scale[0] // 2, -img_scale[1] // 2),
-    #     max_translate_ratio=0.2),
-    # dict(
-    #     type='YOLOXMixUp',
-    #     img_scale=img_scale,
-    #     ratio_range=(0.5, 1.5),
-    #     pad_val=114.0,
-    #     prob=0.15,
-    #     pre_transform=pre_transform),
-    dict(type='mmdet.Resize', scale=img_scale, keep_ratio=True),
-    dict(type='mmdet.Pad', size=img_scale, pad_val=dict(img=(0, 0, 0))),
+    dict(
+        type='Mosaic',
+        img_scale=img_scale,
+        pad_val=114.0,
+        pre_transform=pre_transform),
+    dict(
+        type='YOLOXMixUp',
+        img_scale=img_scale,
+        ratio_range=(0.5, 1.5),
+        pad_val=114.0,
+        prob=0.15,
+        pre_transform=pre_transform),
+    dict(
+        type='mmdet.RandomAffine',
+        scaling_ratio_range=(0.1, 2.0),
+        border=(-img_scale[0] // 2, -img_scale[1] // 2),
+        max_translate_ratio=0.2),
+    dict(type='ScaleAwareAutoAugmentation'),
+    # dict(type='mmdet.Resize', scale=img_scale, keep_ratio=True),
+    # dict(type='mmdet.Pad', size=img_scale, pad_val=dict(img=(0, 0, 0))),
     dict(type='mmdet.RandomFlip', prob=0.5),
     dict(
         type='mmdet.FilterAnnotations',
@@ -122,7 +127,16 @@ train_dataloader = dict(
         filter_cfg=dict(filter_empty_gt=False, min_size=32),
         pipeline=train_pipeline))
 
-custom_hooks = [dict(type='GetCurrentIterHook', priority=48)]
+custom_hooks = [
+    dict(type='DamoSetAttributeHook', priority=48),
+    dict(
+        type='EMAHook',
+        ema_type='ExpMomentumEMA',
+        momentum=0.0001,
+        update_buffers=True,
+        strict_load=False,
+        priority=49)
+]
 
 train_cfg = dict(
     type='EpochBasedTrainLoop',

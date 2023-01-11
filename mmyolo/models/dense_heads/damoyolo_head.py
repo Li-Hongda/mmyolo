@@ -1,5 +1,6 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import copy
+import math
 from typing import List, Optional, Sequence, Tuple, Union
 
 import torch
@@ -207,6 +208,7 @@ class ZEROHead(YOLOv5Head):
                 use_sigmoid=True,
                 reduction='sum',
                 loss_weight=1.0),
+            loss_distill: ConfigType = None,
             train_cfg: OptConfigType = None,
             test_cfg: OptConfigType = None,
             init_cfg: OptMultiConfig = None):
@@ -220,6 +222,22 @@ class ZEROHead(YOLOv5Head):
             train_cfg=train_cfg,
             test_cfg=test_cfg,
             init_cfg=init_cfg)
+        if loss_distill is not None:
+            self.loss_distill = MODELS.build(loss_distill)
+
+    def build_align_module(self, align_cfg):
+        teacher_channels = align_cfg['teacher_channel']
+        student_channels = align_cfg['student_channel']
+        self.align_conv = nn.ModuleList([
+            nn.Conv2d(
+                channel, tea_channel, kernel_size=1, stride=1,
+                padding=0).cuda()
+            for channel, tea_channel in zip(student_channels, teacher_channels)
+        ])
+        self.align_norm = [
+            nn.BatchNorm2d(tea_channel, affine=False).cuda()
+            for tea_channel in teacher_channels
+        ]
 
     def special_init(self):
         """Since YOLO series algorithms will inherit from YOLOv5Head, but
@@ -246,6 +264,53 @@ class ZEROHead(YOLOv5Head):
             predictions, and objectnesses.
         """
         return self.head_module(x)
+
+    def loss(self,
+             x: Tuple[Tensor],
+             batch_data_samples: Union[list, dict],
+             teacher_feats: Tuple[Tensor] = None) -> dict:
+        """Perform forward propagation and loss calculation of the detection
+        head on the features of the upstream network.
+
+        Args:
+            x (tuple[Tensor]): Features from the upstream network, each is
+                a 4D-tensor.
+            batch_data_samples (List[:obj:`DetDataSample`], dict): The Data
+                Samples. It usually includes information such as
+                `gt_instance`, `gt_panoptic_seg` and `gt_sem_seg`.
+            teacher_feats (tuple[Tensor]): Features from the teacher network,
+            each is a 4D-tensor.
+            Defaults to None.
+
+        Returns:
+            dict: A dictionary of loss components.
+        """
+
+        if isinstance(batch_data_samples, list):
+            losses = super().loss(x, batch_data_samples)
+            if teacher_feats is not None:
+                distill_weight = (
+                    (1 - math.cos(self.iter * math.pi / self.num_data)) /
+                    2) * (0.1 - 1) + 1
+                tea_feats = []
+                stu_feats = []
+
+                for idx, (s, t) in enumerate(zip(x, teacher_feats)):
+                    s = self.align_conv[idx](s)
+                    s = self.align_norm[idx](s)
+                    t = self.align_norm[idx](t)
+                    tea_feats.append(t)
+                    stu_feats.append(s)
+                distill_loss = self.loss_distill(stu_feats, tea_feats,
+                                                 distill_weight)
+                losses.update(loss_distill=distill_loss)
+        else:
+            outs = self(x)
+            # Fast version
+            loss_inputs = outs + (batch_data_samples['bboxes_labels'],
+                                  batch_data_samples['img_metas'])
+            losses = self.loss_by_feat(*loss_inputs)
+        return losses
 
     def loss_by_feat(
             self,
@@ -369,8 +434,8 @@ class ZEROHead(YOLOv5Head):
             )
 
         else:
-            loss_bbox = bbox_preds.sum() * 0.0
-            loss_dfl = bbox_preds.sum() * 0.0
+            loss_bbox = flatten_bbox_preds.sum() * 0.0
+            loss_dfl = flatten_bbox_preds.sum() * 0.0
 
         # total_loss = loss_qfl + loss_bbox + loss_dfl
 
@@ -584,21 +649,3 @@ class ZEROHead(YOLOv5Head):
 
         return (labels, label_scores, label_weights, bbox_targets,
                 bbox_weights, dfl_targets, pos_inds.size(0))
-
-    def sample(self, assign_result, gt_bboxes):
-        pos_inds = torch.nonzero(
-            assign_result.gt_inds > 0, as_tuple=False).squeeze(-1).unique()
-        neg_inds = torch.nonzero(
-            assign_result.gt_inds == 0, as_tuple=False).squeeze(-1).unique()
-        pos_assigned_gt_inds = assign_result.gt_inds[pos_inds] - 1
-
-        if gt_bboxes.numel() == 0:
-            # hack for index error case
-            assert pos_assigned_gt_inds.numel() == 0
-            pos_gt_bboxes = torch.empty_like(gt_bboxes).view(-1, 4)
-        else:
-            if len(gt_bboxes.shape) < 2:
-                gt_bboxes = gt_bboxes.view(-1, 4)
-            pos_gt_bboxes = gt_bboxes[pos_assigned_gt_inds, :]
-
-        return pos_inds, neg_inds, pos_gt_bboxes,

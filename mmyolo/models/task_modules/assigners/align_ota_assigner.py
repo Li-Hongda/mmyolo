@@ -76,24 +76,27 @@ class AlignOTAAssigner(SimOTAAssigner):
         assigned_gt_inds = decoded_bboxes.new_full((num_bboxes, ),
                                                    0,
                                                    dtype=torch.long)
+        if num_gt == 0 or num_bboxes == 0:
+            # No ground truth or boxes, return empty assignment
+            max_overlaps = decoded_bboxes.new_zeros((num_bboxes, ))
+            assigned_labels = decoded_bboxes.new_full((num_bboxes, ),
+                                                      -1,
+                                                      dtype=torch.long)
+            return AssignResult(
+                num_gt, assigned_gt_inds, max_overlaps, labels=assigned_labels)
+
         valid_mask, is_in_boxes_and_center = self.get_in_gt_and_in_center_info(
             priors, gt_bboxes)
         valid_decoded_bbox = decoded_bboxes[valid_mask]
         valid_pred_scores = pred_scores[valid_mask]
         num_valid = valid_decoded_bbox.size(0)
 
-        if num_gt == 0 or num_bboxes == 0 or num_valid == 0:
-            # No ground truth or boxes, return empty assignment
+        if num_valid == 0:
+            # No valid bboxes, return empty assignment
             max_overlaps = decoded_bboxes.new_zeros((num_bboxes, ))
-            if num_gt == 0:
-                # No truth, assign everything to background
-                assigned_gt_inds[:] = 0
-            if gt_labels is None:
-                assigned_labels = None
-            else:
-                assigned_labels = decoded_bboxes.new_full((num_bboxes, ),
-                                                          -1,
-                                                          dtype=torch.long)
+            assigned_labels = decoded_bboxes.new_full((num_bboxes, ),
+                                                      -1,
+                                                      dtype=torch.long)
             return AssignResult(
                 num_gt, assigned_gt_inds, max_overlaps, labels=assigned_labels)
 
