@@ -7,6 +7,7 @@ dataset_type = 'YOLOv5CocoDataset'
 # parameters that often need to be modified
 img_scale = (640, 640)  # height, width
 max_epochs = 300
+num_last_epochs = 15
 save_epoch_intervals = 10
 train_batch_size_per_gpu = 2
 train_num_workers = 2
@@ -15,7 +16,7 @@ val_num_workers = 2
 base_lr = 0.01 / 64
 strides = [8, 16, 32]
 # persistent_workers must be False if num_workers is 0.
-persistent_workers = True
+persistent_workers = False
 
 teacher_ckpt = 'work_dirs/damo_yolo_m_coco/damoyolo_M_coco.pth'  # noqa
 model = dict(
@@ -100,8 +101,20 @@ train_pipeline = [
         border=(-img_scale[0] // 2, -img_scale[1] // 2),
         max_translate_ratio=0.2),
     dict(type='ScaleAwareAutoAugmentation'),
-    # dict(type='mmdet.Resize', scale=img_scale, keep_ratio=True),
-    # dict(type='mmdet.Pad', size=img_scale, pad_val=dict(img=(0, 0, 0))),
+    dict(type='mmdet.RandomFlip', prob=0.5),
+    dict(
+        type='mmdet.FilterAnnotations',
+        min_gt_bbox_wh=(1, 1),
+        keep_empty=False),
+    dict(
+        type='mmdet.PackDetInputs',
+        meta_keys=('img_id', 'img_path', 'ori_shape', 'img_shape', 'flip',
+                   'flip_direction'))
+]
+
+train_pipeline_stage2 = [
+    *pre_transform,
+    dict(type='ScaleAwareAutoAugmentation'),
     dict(type='mmdet.RandomFlip', prob=0.5),
     dict(
         type='mmdet.FilterAnnotations',
@@ -135,7 +148,11 @@ custom_hooks = [
         momentum=0.0001,
         update_buffers=True,
         strict_load=False,
-        priority=49)
+        priority=49),
+    dict(
+        type='mmdet.PipelineSwitchHook',
+        switch_epoch=max_epochs - num_last_epochs,
+        switch_pipeline=train_pipeline_stage2)
 ]
 
 train_cfg = dict(
@@ -154,6 +171,13 @@ optim_wrapper = dict(
         weight_decay=0.0005,
         batch_size_per_gpu=train_batch_size_per_gpu),
     constructor='YOLOv5OptimizerConstructor')
+
+default_hooks = dict(
+    param_scheduler=dict(
+        type='YOLOv5ParamSchedulerHook',
+        scheduler_type='cosine',
+        lr_factor=0.01,
+        max_epochs=max_epochs))
 
 val_dataloader = dict(
     batch_size=val_batch_size_per_gpu,

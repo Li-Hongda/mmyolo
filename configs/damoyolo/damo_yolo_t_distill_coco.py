@@ -16,11 +16,14 @@ val_num_workers = 2
 base_lr = 0.01
 strides = [8, 16, 32]
 # persistent_workers must be False if num_workers is 0.
-persistent_workers = True
+persistent_workers = False
 
+teacher_ckpt = 'work_dirs/damo_yolo_s_coco/damoyolo_S_coco.pth'  # noqa
 model = dict(
-    type='YOLODetector',
+    type='KnowledgeDistillationYOLODetector',
     use_syncbn=False,
+    teacher_config='configs/damoyolo/damo_yolo_s_coco.py',
+    teacher_ckpt=teacher_ckpt,
     data_preprocessor=dict(type='mmdet.DetDataPreprocessor', bgr_to_rgb=True),
     backbone=dict(type='TinyNAS', arch='T', out_indices=(2, 4, 5)),
     neck=dict(
@@ -47,7 +50,8 @@ model = dict(
             beta=2.0,
             loss_weight=1.0),
         loss_bbox=dict(type='mmdet.GIoULoss', loss_weight=2.0),
-        loss_obj=dict(type='mmdet.DistributionFocalLoss', loss_weight=0.25)),
+        loss_obj=dict(type='mmdet.DistributionFocalLoss', loss_weight=0.25),
+        loss_distill=dict(type='CWDLoss')),
     train_cfg=dict(
         assigner=dict(
             type='AlignOTAAssigner',

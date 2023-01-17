@@ -7,6 +7,7 @@ dataset_type = 'YOLOv5CocoDataset'
 # parameters that often need to be modified
 img_scale = (640, 640)  # height, width
 max_epochs = 300
+num_last_epochs = 15
 save_epoch_intervals = 10
 train_batch_size_per_gpu = 2
 train_num_workers = 2
@@ -76,13 +77,6 @@ test_pipeline = [
                    'scale_factor'))
 ]
 
-albu_train_transforms = [
-    dict(type='Blur', p=0.01),
-    dict(type='MedianBlur', p=0.01),
-    dict(type='ToGray', p=0.01),
-    dict(type='CLAHE', p=0.01)
-]
-
 pre_transform = [
     dict(type='LoadImageFromFile', file_client_args=_base_.file_client_args),
     dict(type='LoadAnnotations', with_bbox=True)
@@ -96,25 +90,37 @@ train_pipeline = [
         pad_val=114.0,
         pre_transform=pre_transform),
     dict(
-        type='YOLOv5RandomAffine',
-        max_rotate_degree=0.0,
-        max_shear_degree=0.0,
-        scaling_ratio_range=(0.5, 1.5),
-        border=(-img_scale[0] // 2, -img_scale[1] // 2),
-        border_val=(114, 114, 114)),
+        type='YOLOXMixUp',
+        img_scale=img_scale,
+        ratio_range=(0.5, 1.5),
+        pad_val=114.0,
+        prob=0.15,
+        pre_transform=pre_transform),
     dict(
-        type='mmdet.Albu',
-        transforms=albu_train_transforms,
-        bbox_params=dict(
-            type='BboxParams',
-            format='pascal_voc',
-            label_fields=['gt_bboxes_labels', 'gt_ignore_flags']),
-        keymap={
-            'img': 'image',
-            'gt_bboxes': 'bboxes'
-        }),
-    dict(type='YOLOv5HSVRandomAug'),
+        type='mmdet.RandomAffine',
+        scaling_ratio_range=(0.1, 2.0),
+        border=(-img_scale[0] // 2, -img_scale[1] // 2),
+        max_translate_ratio=0.2),
+    dict(type='ScaleAwareAutoAugmentation'),
     dict(type='mmdet.RandomFlip', prob=0.5),
+    dict(
+        type='mmdet.FilterAnnotations',
+        min_gt_bbox_wh=(1, 1),
+        keep_empty=False),
+    dict(
+        type='mmdet.PackDetInputs',
+        meta_keys=('img_id', 'img_path', 'ori_shape', 'img_shape', 'flip',
+                   'flip_direction'))
+]
+
+train_pipeline_stage2 = [
+    *pre_transform,
+    dict(type='ScaleAwareAutoAugmentation'),
+    dict(type='mmdet.RandomFlip', prob=0.5),
+    dict(
+        type='mmdet.FilterAnnotations',
+        min_gt_bbox_wh=(1, 1),
+        keep_empty=False),
     dict(
         type='mmdet.PackDetInputs',
         meta_keys=('img_id', 'img_path', 'ori_shape', 'img_shape', 'flip',
@@ -135,7 +141,27 @@ train_dataloader = dict(
         filter_cfg=dict(filter_empty_gt=True, min_size=32),
         pipeline=train_pipeline))
 
-custom_hooks = []
+custom_hooks = [
+    dict(type='DamoSetAttributeHook', priority=48),
+    dict(
+        type='EMAHook',
+        ema_type='ExpMomentumEMA',
+        momentum=0.0001,
+        update_buffers=True,
+        strict_load=False,
+        priority=49),
+    dict(
+        type='mmdet.PipelineSwitchHook',
+        switch_epoch=max_epochs - num_last_epochs,
+        switch_pipeline=train_pipeline_stage2)
+]
+
+default_hooks = dict(
+    param_scheduler=dict(
+        type='YOLOv5ParamSchedulerHook',
+        scheduler_type='cosine',
+        lr_factor=0.01,
+        max_epochs=max_epochs))
 
 train_cfg = dict(
     type='EpochBasedTrainLoop',
