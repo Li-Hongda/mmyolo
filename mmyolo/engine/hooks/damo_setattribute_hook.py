@@ -27,10 +27,10 @@ class DamoSetAttributeHook(Hook):
         model = runner.model
         if is_model_wrapper(model):
             model = model.module
-        align_cfg = dict(
-            student_channel=model.neck.out_channels,
-            teacher_channel=model.teacher_model.neck.out_channels)
-        if model.bbox_head.loss_distill is not None:
+        if hasattr(model, 'teacher_model'):
+            align_cfg = dict(
+                student_channel=model.neck.out_channels,
+                teacher_channel=model.teacher_model.neck.out_channels)
             model.bbox_head.build_align_module(align_cfg)
         model.bbox_head.num_data = len(runner.train_dataloader)
 
